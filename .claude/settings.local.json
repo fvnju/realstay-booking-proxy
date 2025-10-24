@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bun x wrangler d1 migrations apply realstay-bookings-db --remote)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

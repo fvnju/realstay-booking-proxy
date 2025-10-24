@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "realstay-bookings",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-08",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "realstay-bookings-db",
+      "database_id": "bb36c3f2-71ec-4b9d-b55e-453bd12c894f",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  // Note: Set secrets using:
+  // wrangler secret put MONOLITH_EMAIL
+  // wrangler secret put MONOLITH_PASSWORD
+}
