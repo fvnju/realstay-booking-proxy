@@ -34,6 +34,12 @@ export const bookings = sqliteTable(
     paymentStatus: text("payment_status", {
       enum: ["pending", "paid", "refunded", "failed"],
     }).$default(() => "pending"),
+    monolithId: text("monolith_id"),
+    syncStatus: text("sync_status", {
+      enum: ["synced", "pending_sync", "sync_failed"],
+    })
+      .notNull()
+      .default("pending_sync"),
   },
   (table) => ({
     // Removed unique constraints on property/user + time slots
@@ -43,6 +49,7 @@ export const bookings = sqliteTable(
     propertyIdx: index("property_idx").on(table.propertyId),
     userIdx: index("user_idx").on(table.userId),
     ownerIdx: index("owner_idx").on(table.ownerId),
+    syncStatusIdx: index("sync_status_idx").on(table.syncStatus),
   }),
 );
 

@@ -107,7 +107,6 @@ guestBookings.post("/", zValidator("json", createBookingSchema), async (c) => {
     const data = c.req.valid("json");
     const bookingService = new BookingService(c.env);
 
-    // Get user's access token from Authorization header
     const authHeader = c.req.header("Authorization");
     if (!authHeader) {
       return c.json(
@@ -120,51 +119,58 @@ guestBookings.post("/", zValidator("json", createBookingSchema), async (c) => {
     }
 
     const userAccessToken = authHeader.replace("Bearer ", "");
-
-    // Convert string dates to Date objects
     const startTime = new Date(data.startTime);
     const endTime = new Date(data.endTime);
 
-    // Create booking in monolith FIRST to get the monolith's ID
-    let monolithResponse;
+    // Generate a stable local ID before attempting monolith sync
+    const localId = crypto.randomUUID();
+    let monolithId: string | null = null;
+    let syncStatus: "synced" | "pending_sync" = "pending_sync";
+
     try {
       const syncService = new SyncService();
-      monolithResponse = await syncService.createBookingInMonolith(
+      const monolithResponse = await syncService.createBookingInMonolith(
         data.propertyId,
         startTime,
         endTime,
         userAccessToken,
       );
+      monolithId = monolithResponse.data._id;
+      syncStatus = "synced";
     } catch (syncError) {
-      console.error("Monolith booking creation failed:", syncError);
-      return c.json(
-        {
-          success: false,
-          error:
-            syncError instanceof Error
-              ? syncError.message
-              : "Failed to create booking in monolith",
-        },
-        500,
+      console.warn(
+        "Monolith unavailable — booking will be created locally as pending_sync:",
+        syncError instanceof Error ? syncError.message : syncError,
       );
     }
 
-    // Now create booking locally with data from monolith
     const bookingData = {
-      id: monolithResponse.data._id, // Use monolith's ID
-      propertyId: monolithResponse.data.listing_id,
-      userId: monolithResponse.data.customer_id,
-      ownerId: monolithResponse.data.property_owner_id,
-      startTime: new Date(monolithResponse.data.start_date),
-      endTime: new Date(monolithResponse.data.end_date),
+      id: localId,
+      monolithId: monolithId ?? undefined,
+      syncStatus,
+      propertyId: data.propertyId,
+      userId: data.userId,
+      ownerId: data.ownerId,
+      startTime,
+      endTime,
       type: data.type,
       notes: data.notes,
-      status: "pending" as const, // Map PENDING to pending
+      status: "pending" as const,
     };
 
     const newBooking = await bookingService.createBooking(bookingData);
 
-    return c.json({ success: true, data: newBooking }, 201);
+    const responsePayload: Record<string, unknown> = {
+      success: true,
+      data: newBooking,
+    };
+
+    if (syncStatus === "pending_sync") {
+      responsePayload.warning =
+        "Booking saved locally but could not reach the main server. It will sync automatically.";
+    }
+
+    return c.json(responsePayload, 201);
   } catch (error) {
     console.error("Error creating guest booking:", error);
     if (error instanceof Error) {
@@ -237,7 +243,6 @@ guestBookings.post("/payment", zValidator("json", paymentSchema), async (c) => {
     const data = c.req.valid("json");
     const bookingService = new BookingService(c.env);
 
-    // Get user's access token from Authorization header
     const authHeader = c.req.header("Authorization");
     if (!authHeader) {
       return c.json(
@@ -251,16 +256,34 @@ guestBookings.post("/payment", zValidator("json", paymentSchema), async (c) => {
 
     const userAccessToken = authHeader.replace("Bearer ", "");
 
-    // Set booking data
+    // Guard: fetch booking first to check sync state
+    const existingBooking = await bookingService.getBookingById(data.bookingId);
+    if (!existingBooking) {
+      return c.json({ success: false, error: "Booking not found" }, 404);
+    }
+
+    // Cannot process payment for a booking that hasn't reached the monolith yet
+    if (!existingBooking.monolithId) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "This booking has not yet synced to the main server. Please try again shortly.",
+          syncStatus: existingBooking.syncStatus,
+        },
+        409,
+      );
+    }
+
+    // Mark booking as completed locally
     const booking = await bookingService.completeBooking(data.bookingId);
 
-    // Sync to monolith synchronously (using user's token)
+    // Sync payment to monolith
     try {
       const monolithService = new MonolithClient();
       await monolithService.setPayment(data, userAccessToken);
     } catch (error) {
       console.error("Setting payment data in Monolith failed:", error);
-      // Booking created locally, but sync failed
       return c.json(
         {
           success: true,

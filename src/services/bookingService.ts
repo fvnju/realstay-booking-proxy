@@ -11,7 +11,9 @@ import {
 } from "../db/schema";
 
 export interface CreateBookingRequest {
-  id?: string;
+  id?: string; // Optional — UUID generated locally if omitted
+  monolithId?: string; // Monolith's _id — null at creation if monolith was down
+  syncStatus?: "synced" | "pending_sync" | "sync_failed";
   propertyId: string;
   userId: string;
   ownerId: string;
@@ -27,6 +29,8 @@ export interface UpdateBookingRequest {
   notes?: string;
   cancelledAt?: Date | null;
   paymentStatus?: "pending" | "paid" | "refunded" | "failed";
+  monolithId?: string;
+  syncStatus?: "synced" | "pending_sync" | "sync_failed";
 }
 
 export interface BookingFilter {
@@ -44,15 +48,12 @@ export class BookingService {
   async createBooking(data: CreateBookingRequest): Promise<Booking> {
     const db = getDb(this.env);
 
-    // Note: Availability checks are handled by the monolith
-    // Since bookings are created in the monolith first (which validates availability),
-    // we just store the booking locally without re-checking
-
-    // Create the booking
     const [newBooking] = await db
       .insert(bookings)
       .values({
-        id: data.id as string, // Use provided ID (from monolith)
+        id: data.id ?? crypto.randomUUID(),
+        monolithId: data.monolithId ?? null,
+        syncStatus: data.syncStatus ?? "pending_sync",
         propertyId: data.propertyId,
         userId: data.userId,
         ownerId: data.ownerId,
@@ -60,7 +61,7 @@ export class BookingService {
         endTime: data.endTime.toISOString(),
         type: data.type,
         notes: data.notes,
-        status: data.status || "pending", // Use provided status or default to pending
+        status: data.status || "pending",
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       })
@@ -141,7 +142,9 @@ export class BookingService {
 
     const updateData: any = { ...data };
     if (data.cancelledAt !== undefined) {
-      updateData.cancelledAt = data.cancelledAt ? data.cancelledAt.toISOString() : null;
+      updateData.cancelledAt = data.cancelledAt
+        ? data.cancelledAt.toISOString()
+        : null;
     }
     updateData.updatedAt = new Date().toISOString();
 
@@ -182,6 +185,30 @@ export class BookingService {
     });
   }
 
+  async markAsSynced(
+    localBookingId: string,
+    monolithId: string,
+  ): Promise<Booking | null> {
+    return await this.updateBooking(localBookingId, {
+      monolithId,
+      syncStatus: "synced",
+    });
+  }
+
+  async markSyncFailed(localBookingId: string): Promise<Booking | null> {
+    return await this.updateBooking(localBookingId, {
+      syncStatus: "sync_failed",
+    });
+  }
+
+  async getPendingSyncBookings(): Promise<Booking[]> {
+    const db = getDb(this.env);
+    return await db
+      .select()
+      .from(bookings)
+      .where(eq(bookings.syncStatus, "pending_sync"));
+  }
+
   private async checkAvailability(
     propertyId: string,
     startTime: Date,
@@ -197,8 +224,8 @@ export class BookingService {
         and(
           eq(bookings.propertyId, propertyId),
           eq(bookings.status, "confirmed"), // Only consider confirmed bookings
-          lte(bookings.startTime, endTime), // Start time before or at end time
-          gte(bookings.endTime, startTime), // End time after or at start time
+          lte(bookings.startTime, endTime.toISOString()), // Start time before or at end time
+          gte(bookings.endTime, startTime.toISOString()), // End time after or at start time
         ),
       );
 
@@ -214,8 +241,8 @@ export class BookingService {
         and(
           eq(bookingAvailability.propertyId, propertyId),
           eq(bookingAvailability.isAvailable, false), // Look for blocked times
-          lte(bookingAvailability.availableStartTime, endTime),
-          gte(bookingAvailability.availableEndTime, startTime),
+          lte(bookingAvailability.availableStartTime, endTime.toISOString()),
+          gte(bookingAvailability.availableEndTime, startTime.toISOString()),
         ),
       );
 

@@ -4,6 +4,7 @@
 
 import { Booking } from "../db/schema";
 import { MONOLITH_BASE_URL } from "./monolithClient";
+import { BookingService } from "./bookingService";
 
 export type MonolithBookingResponse = {
   data: {
@@ -77,40 +78,103 @@ export class SyncService {
   }
 
   /**
-   * Sync a booking update to the monolith using the user's access token
+   * Sync a booking status update to the monolith using the user's access token.
+   * Skips silently if the booking has not yet been synced (no monolithId).
    */
   async syncBookingUpdate(
     booking: Booking,
     userAccessToken: string,
   ): Promise<void> {
-    try {
-      // Map our status to monolith status
-      const statusMap: Record<string, string> = {
-        pending: "PENDING",
-        confirmed: "CONFIRMED",
-        completed: "COMPLETED",
-        cancelled: "CANCELLED",
-        declined: "CANCELLED",
-      };
-
-      const monolithStatus = statusMap[booking.status] || "PENDING";
-
-      // Note: The monolith might need the original booking ID to update
-      // For now, we'll log a warning since we don't store the monolith booking ID
+    if (!booking.monolithId) {
       console.warn(
-        `⚠️  Booking update sync for ${booking.id} - would need monolith booking ID to update`,
+        `⚠️  Skipping update sync for ${booking.id} — no monolithId yet`,
       );
-      console.log(`   Status: ${booking.status} -> ${monolithStatus}`);
+      return;
+    }
 
-      // If you want to implement this fully, you'll need to:
-      // 1. Store the monolith booking ID in your schema when creating bookings
-      // 2. Use that ID to make an update request to the monolith
-    } catch (error) {
-      console.error(
-        `❌ Failed to sync booking update ${booking.id} to monolith:`,
-        error,
+    const statusMap: Record<string, string> = {
+      pending: "PENDING",
+      confirmed: "CONFIRMED",
+      completed: "COMPLETED",
+      cancelled: "CANCELLED",
+      declined: "CANCELLED",
+    };
+
+    const response = await fetch(
+      `${MONOLITH_BASE_URL}/bookings/${booking.monolithId}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${userAccessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          status: statusMap[booking.status] ?? "PENDING",
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      throw new Error(`Monolith update failed: ${response.status}`);
+    }
+
+    console.log(
+      `✅ Synced booking update ${booking.id} → monolith ${booking.monolithId}`,
+    );
+  }
+
+  /**
+   * Retry pushing a single pending_sync booking to the monolith.
+   * - 4xx response  → definitive failure: marks the booking as sync_failed
+   * - 5xx / network → transient failure: leaves it as pending_sync for the next retry
+   */
+  async retrySingleBooking(
+    booking: Booking,
+    userAccessToken: string,
+    bookingService: BookingService,
+  ): Promise<"synced" | "failed"> {
+    try {
+      const formatDate = (d: string) => new Date(d).toISOString().split("T")[0];
+
+      const response = await fetch(`${MONOLITH_BASE_URL}/bookings`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${userAccessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          listing_id: booking.propertyId,
+          start_date: formatDate(booking.startTime),
+          end_date: formatDate(booking.endTime),
+        }),
+      });
+
+      if (!response.ok) {
+        if (response.status >= 400 && response.status < 500) {
+          // Definitive failure — monolith rejected the booking (e.g. 400, 409)
+          await bookingService.markSyncFailed(booking.id);
+          console.error(
+            `❌ Booking ${booking.id} permanently rejected by monolith: ${response.status}`,
+          );
+        } else {
+          // Transient failure (5xx) — leave as pending_sync for next retry
+          console.warn(
+            `⚠️  Transient monolith error for booking ${booking.id}: ${response.status} — will retry`,
+          );
+        }
+        return "failed";
+      }
+
+      const data = (await response.json()) as MonolithBookingResponse;
+      await bookingService.markAsSynced(booking.id, data.data._id);
+      console.log(
+        `✅ Retry synced booking ${booking.id} → monolith ${data.data._id}`,
       );
-      // Don't re-throw for updates - they're not critical
+      return "synced";
+    } catch (err) {
+      // Network error / timeout — transient, leave as pending_sync
+      console.error(`❌ Network error retrying booking ${booking.id}:`, err);
+      return "failed";
     }
   }
 }

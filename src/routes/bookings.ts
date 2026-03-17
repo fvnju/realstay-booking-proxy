@@ -3,6 +3,7 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { Env } from "../env";
 import { BookingService } from "../services/bookingService";
+import { SyncService } from "../services/syncService";
 
 // Define the Hono app for bookings with environment type
 const bookings = new Hono<{ Bindings: Env }>();
@@ -191,6 +192,60 @@ bookings.patch("/:id/complete", async (c) => {
   } catch (error) {
     console.error("Error completing booking:", error);
     return c.json({ success: false, error: "Failed to complete booking" }, 500);
+  }
+});
+
+// POST /api/bookings/sync/retry - Retry syncing all pending_sync bookings to the monolith
+// Called by the mobile app periodically after connectivity is restored
+bookings.post("/sync/retry", async (c) => {
+  try {
+    const authHeader = c.req.header("Authorization");
+    if (!authHeader) {
+      return c.json(
+        { success: false, error: "Authorization header is required" },
+        401,
+      );
+    }
+
+    const userAccessToken = authHeader.replace("Bearer ", "");
+    const bookingService = new BookingService(c.env);
+    const syncService = new SyncService();
+
+    const pending = await bookingService.getPendingSyncBookings();
+
+    if (pending.length === 0) {
+      return c.json({
+        success: true,
+        message: "Nothing to sync",
+        total: 0,
+        synced: 0,
+        failed: 0,
+      });
+    }
+
+    const results = await Promise.allSettled(
+      pending.map((b) =>
+        syncService.retrySingleBooking(b, userAccessToken, bookingService),
+      ),
+    );
+
+    const synced = results.filter(
+      (r) => r.status === "fulfilled" && r.value === "synced",
+    ).length;
+
+    const failed = results.filter(
+      (r) => r.status === "fulfilled" && r.value === "failed",
+    ).length;
+
+    return c.json({
+      success: true,
+      total: pending.length,
+      synced,
+      failed,
+    });
+  } catch (error) {
+    console.error("Error during sync retry:", error);
+    return c.json({ success: false, error: "Sync retry failed" }, 500);
   }
 });
 
