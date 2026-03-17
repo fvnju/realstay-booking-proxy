@@ -2,7 +2,7 @@
  * Client for interacting with the RealStay monolith API
  */
 
-const MONOLITH_BASE_URL = "https://realstay-api-staging.edgetechino.com";
+export const MONOLITH_BASE_URL = "https://realstay-api-staging.edgetechino.com";
 
 export interface MonolithBooking {
   _id: string;

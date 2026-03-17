@@ -3,8 +3,7 @@
  */
 
 import { Booking } from "../db/schema";
-
-const MONOLITH_BASE_URL = "https://real-stay-api.onrender.com";
+import { MONOLITH_BASE_URL } from "./monolithClient";
 
 export type MonolithBookingResponse = {
   data: {
