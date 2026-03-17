@@ -2,7 +2,7 @@
  * Client for interacting with the RealStay monolith API
  */
 
-const MONOLITH_BASE_URL = "https://real-stay-api.onrender.com";
+const MONOLITH_BASE_URL = "https://realstay-api-staging.edgetechino.com";
 
 export interface MonolithBooking {
   _id: string;
@@ -42,14 +42,14 @@ export interface MonolithBooking {
 export interface MonolithBookingsResponse {
   data: {
     bookings: MonolithBooking[];
-    pagination: {
-      total_items: number;
-      total_pages: number;
-      current_page: number;
-      limit: number;
-    };
   };
   success: boolean;
+  pagination: {
+    total_items: number;
+    total_pages: number;
+    current_page: number;
+    limit: number;
+  };
 }
 
 export interface MonolithAuthResponse {
@@ -166,7 +166,7 @@ export class MonolithClient {
       const response = await this.fetchBookings(currentPage, 100);
       console.log(response);
       allBookings.push(...response.data.bookings);
-      totalPages = response.data.pagination.total_pages;
+      totalPages = response.pagination.total_pages;
       currentPage++;
 
       console.log(
