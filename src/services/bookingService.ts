@@ -42,6 +42,14 @@ export interface BookingFilter {
   endDate?: Date;
 }
 
+export interface UnavailableRange {
+  startTime: string;
+  endTime: string;
+  source: "booking" | "availability";
+  bookingId?: string;
+  status?: "pending" | "confirmed" | "completed";
+}
+
 export class BookingService {
   constructor(private env: Env) {}
 
@@ -207,6 +215,92 @@ export class BookingService {
       .select()
       .from(bookings)
       .where(eq(bookings.syncStatus, "pending_sync"));
+  }
+
+  async getUnavailableRanges(
+    propertyId: string,
+    startDate?: Date,
+    endDate?: Date,
+  ): Promise<UnavailableRange[]> {
+    const db = getDb(this.env);
+    const nowIso = new Date().toISOString();
+
+    const bookingConditions = [
+      eq(bookings.propertyId, propertyId),
+      or(
+        eq(bookings.status, "confirmed"),
+        eq(bookings.status, "pending"),
+        eq(bookings.status, "completed"),
+      )!,
+    ];
+
+    if (startDate) {
+      bookingConditions.push(gte(bookings.endTime, startDate.toISOString()));
+    }
+
+    if (endDate) {
+      bookingConditions.push(lte(bookings.startTime, endDate.toISOString()));
+    }
+
+    const blockingBookings = await db
+      .select({
+        id: bookings.id,
+        startTime: bookings.startTime,
+        endTime: bookings.endTime,
+        status: bookings.status,
+      })
+      .from(bookings)
+      .where(and(...bookingConditions));
+
+    const availabilityConditions = [
+      eq(bookingAvailability.propertyId, propertyId),
+      eq(bookingAvailability.isAvailable, false),
+    ];
+
+    if (startDate) {
+      availabilityConditions.push(
+        gte(bookingAvailability.availableEndTime, startDate.toISOString()),
+      );
+    }
+
+    if (endDate) {
+      availabilityConditions.push(
+        lte(bookingAvailability.availableStartTime, endDate.toISOString()),
+      );
+    }
+
+    const blockedSlots = await db
+      .select({
+        startTime: bookingAvailability.availableStartTime,
+        endTime: bookingAvailability.availableEndTime,
+      })
+      .from(bookingAvailability)
+      .where(and(...availabilityConditions));
+
+    const bookingRanges: UnavailableRange[] = blockingBookings.map((booking) => ({
+      startTime: booking.startTime,
+      endTime: booking.endTime,
+      source: "booking" as const,
+      bookingId: booking.id,
+      status: booking.status as "pending" | "confirmed" | "completed",
+    }))
+    .filter((booking) => {
+      if (booking.status !== "completed") {
+        return true;
+      }
+
+      return booking.endTime >= nowIso;
+    });
+
+    const availabilityRanges: UnavailableRange[] = blockedSlots.map((slot) => ({
+      startTime: slot.startTime,
+      endTime: slot.endTime,
+      source: "availability",
+    }));
+
+    return [...bookingRanges, ...availabilityRanges].sort((a, b) =>
+      a.startTime.localeCompare(b.startTime),
+    );
   }
 
   private async checkAvailability(

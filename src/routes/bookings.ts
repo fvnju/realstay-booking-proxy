@@ -34,6 +34,12 @@ const bookingFilterSchema = z.object({
   endDate: z.string().datetime().optional(),
 });
 
+const unavailableRangesSchema = z.object({
+  propertyId: z.string().min(1),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+});
+
 // GET /bookings - List bookings with optional filters
 bookings.get("/", zValidator("query", bookingFilterSchema), async (c) => {
   try {
@@ -60,6 +66,32 @@ bookings.get("/", zValidator("query", bookingFilterSchema), async (c) => {
     return c.json({ success: false, error: "Failed to fetch bookings" }, 500);
   }
 });
+
+// GET /bookings/unavailable - List unavailable date ranges for a property
+bookings.get(
+  "/unavailable",
+  zValidator("query", unavailableRangesSchema),
+  async (c) => {
+    try {
+      const bookingService = new BookingService(c.env);
+      const { propertyId, startDate, endDate } = c.req.valid("query");
+
+      const ranges = await bookingService.getUnavailableRanges(
+        propertyId,
+        startDate ? new Date(startDate) : undefined,
+        endDate ? new Date(endDate) : undefined,
+      );
+
+      return c.json({ success: true, data: ranges });
+    } catch (error) {
+      console.error("Error fetching unavailable booking ranges:", error);
+      return c.json(
+        { success: false, error: "Failed to fetch unavailable booking ranges" },
+        500,
+      );
+    }
+  },
+);
 
 // GET /bookings/:id - Get a specific booking
 bookings.get("/:id", async (c) => {

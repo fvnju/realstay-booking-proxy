@@ -5,6 +5,7 @@ import { Env } from "../env";
 import { BookingService } from "../services/bookingService";
 import { SyncService } from "../services/syncService";
 import { MonolithClient } from "../services/monolithClient";
+import type { Booking } from "../db/schema";
 
 // Define the Hono app for guest bookings
 const guestBookings = new Hono<{ Bindings: Env }>();
@@ -28,32 +29,120 @@ const bookingFilterSchema = z.object({
   endDate: z.string().datetime().optional(),
 });
 
+const bookingCategoryFilterSchema = z.object({
+  userId: z.string().min(1),
+  propertyId: z.string().optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+});
+
+type GuestBookingCategories = {
+  upcoming: Booking[];
+  past: Booking[];
+  cancelled: Booking[];
+  pending: Booking[];
+};
+
+type BookingFilterQuery = z.infer<typeof bookingFilterSchema>;
+type BookingCategoryFilterQuery = z.infer<typeof bookingCategoryFilterSchema>;
+
+async function getGuestBookings(
+  env: Env,
+  filter: BookingFilterQuery | BookingCategoryFilterQuery,
+): Promise<Booking[]> {
+  const bookingService = new BookingService(env);
+  const statusArray =
+    "status" in filter && filter.status ? filter.status.split(",") : undefined;
+
+  return bookingService.getBookings({
+    userId: filter.userId,
+    propertyId: filter.propertyId,
+    status: statusArray as
+      | ("pending" | "confirmed" | "completed" | "cancelled" | "declined")[]
+      | undefined,
+    startDate: filter.startDate ? new Date(filter.startDate) : undefined,
+    endDate: filter.endDate ? new Date(filter.endDate) : undefined,
+  });
+}
+
+function categorizeGuestBookings(bookings: Booking[]): GuestBookingCategories {
+  const now = new Date();
+  const categorizedBookings: GuestBookingCategories = {
+    upcoming: [],
+    past: [],
+    cancelled: [],
+    pending: [],
+  };
+
+  for (const booking of bookings) {
+    const hasEnded = new Date(booking.endTime) < now;
+    const isExpiredPending =
+      booking.status === "pending" && hasEnded;
+    const isExpiredConfirmed = booking.status === "confirmed" && hasEnded;
+    const isCancelledLike =
+      booking.status === "cancelled" ||
+      booking.status === "declined" ||
+      isExpiredPending;
+
+    if (isExpiredConfirmed) {
+      categorizedBookings.past.push(booking);
+      continue;
+    }
+
+    if (booking.status === "confirmed") {
+      categorizedBookings.upcoming.push(booking);
+      continue;
+    }
+
+    if (booking.status === "pending" && !isExpiredPending) {
+      categorizedBookings.upcoming.push(booking);
+      categorizedBookings.pending.push(booking);
+      continue;
+    }
+
+    if (booking.status === "completed" && !hasEnded) {
+      categorizedBookings.upcoming.push(booking);
+      continue;
+    }
+
+    if (booking.status === "completed") {
+      categorizedBookings.past.push(booking);
+      continue;
+    }
+
+    if (isCancelledLike) {
+      categorizedBookings.cancelled.push(booking);
+      categorizedBookings.past.push(booking);
+      continue;
+    }
+  }
+
+  return categorizedBookings;
+}
+
 const paymentSchema = z.object({
   transactionRef: z.string().min(1),
   bookingId: z.string().min(1),
 });
 
+const unavailableRangesSchema = z.object({
+  propertyId: z.string().min(1),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+});
+
 // GET /api/guests/bookings - List bookings for a specific guest
 guestBookings.get("/", zValidator("query", bookingFilterSchema), async (c) => {
   try {
-    const bookingService = new BookingService(c.env);
-    const { userId, propertyId, status, startDate, endDate } =
-      c.req.valid("query");
+    const query = c.req.valid("query");
+    const bookings = await getGuestBookings(c.env, query);
+    const categorizedBookings = categorizeGuestBookings(bookings);
 
-    // Parse the status string into an array
-    const statusArray = status ? status.split(",") : undefined;
-
-    const bookings = await bookingService.getBookings({
-      userId, // Required for guest bookings
-      propertyId,
-      status: statusArray as
-        | ("pending" | "confirmed" | "completed" | "cancelled" | "declined")[]
-        | undefined,
-      startDate: startDate ? new Date(startDate) : undefined,
-      endDate: endDate ? new Date(endDate) : undefined,
+    return c.json({
+      success: true,
+      data: bookings,
+      categorized: categorizedBookings,
     });
-
-    return c.json({ success: true, data: bookings });
   } catch (error) {
     console.error("Error fetching guest bookings:", error);
     return c.json(
@@ -62,6 +151,119 @@ guestBookings.get("/", zValidator("query", bookingFilterSchema), async (c) => {
     );
   }
 });
+
+// GET /api/guests/bookings/upcoming - List upcoming (confirmed + active pending) bookings for a guest
+guestBookings.get(
+  "/upcoming",
+  zValidator("query", bookingCategoryFilterSchema),
+  async (c) => {
+    try {
+      const query = c.req.valid("query");
+      const bookings = await getGuestBookings(c.env, query);
+      const categorizedBookings = categorizeGuestBookings(bookings);
+
+      return c.json({ success: true, data: categorizedBookings.upcoming });
+    } catch (error) {
+      console.error("Error fetching upcoming guest bookings:", error);
+      return c.json(
+        { success: false, error: "Failed to fetch upcoming guest bookings" },
+        500,
+      );
+    }
+  },
+);
+
+// GET /api/guests/bookings/past - List past (completed + cancelled) bookings for a guest
+guestBookings.get(
+  "/past",
+  zValidator("query", bookingCategoryFilterSchema),
+  async (c) => {
+    try {
+      const query = c.req.valid("query");
+      const bookings = await getGuestBookings(c.env, query);
+      const categorizedBookings = categorizeGuestBookings(bookings);
+
+      return c.json({ success: true, data: categorizedBookings.past });
+    } catch (error) {
+      console.error("Error fetching past guest bookings:", error);
+      return c.json(
+        { success: false, error: "Failed to fetch past guest bookings" },
+        500,
+      );
+    }
+  },
+);
+
+// GET /api/guests/bookings/cancelled - List cancelled (cancelled/declined/expired) bookings for a guest
+guestBookings.get(
+  "/cancelled",
+  zValidator("query", bookingCategoryFilterSchema),
+  async (c) => {
+    try {
+      const query = c.req.valid("query");
+      const bookings = await getGuestBookings(c.env, query);
+      const categorizedBookings = categorizeGuestBookings(bookings);
+
+      return c.json({ success: true, data: categorizedBookings.cancelled });
+    } catch (error) {
+      console.error("Error fetching cancelled guest bookings:", error);
+      return c.json(
+        { success: false, error: "Failed to fetch cancelled guest bookings" },
+        500,
+      );
+    }
+  },
+);
+
+// GET /api/guests/bookings/pending - List pending (awaiting payment) bookings for a guest
+guestBookings.get(
+  "/pending",
+  zValidator("query", bookingCategoryFilterSchema),
+  async (c) => {
+    try {
+      const query = c.req.valid("query");
+      const bookings = await getGuestBookings(c.env, query);
+      const categorizedBookings = categorizeGuestBookings(bookings);
+
+      return c.json({ success: true, data: categorizedBookings.pending });
+    } catch (error) {
+      console.error("Error fetching pending guest bookings:", error);
+      return c.json(
+        { success: false, error: "Failed to fetch pending guest bookings" },
+        500,
+      );
+    }
+  },
+);
+
+// GET /api/guests/bookings/unavailable - List unavailable date ranges for a listing
+guestBookings.get(
+  "/unavailable",
+  zValidator("query", unavailableRangesSchema),
+  async (c) => {
+    try {
+      const bookingService = new BookingService(c.env);
+      const { propertyId, startDate, endDate } = c.req.valid("query");
+
+      const ranges = await bookingService.getUnavailableRanges(
+        propertyId,
+        startDate ? new Date(startDate) : undefined,
+        endDate ? new Date(endDate) : undefined,
+      );
+
+      return c.json({ success: true, data: ranges });
+    } catch (error) {
+      console.error("Error fetching unavailable guest booking ranges:", error);
+      return c.json(
+        {
+          success: false,
+          error: "Failed to fetch unavailable guest booking ranges",
+        },
+        500,
+      );
+    }
+  },
+);
 
 // GET /api/guests/bookings/:id - Get a specific booking for a guest
 guestBookings.get("/:id", async (c) => {
